@@ -66,6 +66,117 @@ pub mod hotwings {
 
         Ok(())
     }
+
+    pub fn purchase_tokens(ctx: Context<PurchaseTokens>, amount: u64) -> Result<()> {
+        let locked_tokens = &mut ctx.accounts.locked_tokens;
+    
+        let user = &ctx.accounts.user.key();
+        
+        // Check if we already have this user in user_locks
+        let mut user_found = false;
+        for user_lock in locked_tokens.user_locks.iter_mut() {
+            if user_lock.user == *user {
+                user_lock.total_locked += amount; // Update locked amount
+                user_found = true;
+                break;
+            }
+        }
+    
+        // If user is not found, create a new entry
+        if !user_found {
+            locked_tokens.user_locks.push(UserTokenLock {
+                user: *user,
+                total_locked: amount,
+                unlocked_amount: 0,
+            });
+        }
+    
+        // Update the total locked tokens
+        locked_tokens.total_locked += amount;
+    
+        Ok(())
+    }
+
+    pub fn unlock_tokens(ctx: Context<UnlockTokens>, current_market_cap: u64) -> Result<()> {
+        let locked_tokens = &mut ctx.accounts.locked_tokens;
+    
+        // Determine the percentage to unlock based on milestones
+        let mut unlock_percentage = 0;
+    
+        for (milestone, percentage) in MARKET_CAP_MILESTONES.iter() {
+            if current_market_cap >= *milestone {
+                unlock_percentage = *percentage;
+            } else {
+                break; // Exit the loop since milestones are ordered
+            }
+        }
+    
+        // Distribute unlocked tokens to all users
+        for user_lock in &mut locked_tokens.user_locks {
+            // Calculate the amount to unlock for this user
+            let unlock_amount = (user_lock.total_locked * unlock_percentage) / 100;
+    
+            if unlock_amount > 0 {
+                // Adjust unlocked amounts and total locked
+                user_lock.unlocked_amount += unlock_amount;
+                user_lock.total_locked -= unlock_amount;
+                locked_tokens.total_locked -= unlock_amount;
+    
+                // Transfer unlocked tokens to users' wallets
+                let transfer_accounts = token::Transfer {
+                    from: ctx.accounts.locked_tokens.to_account_info(),
+                    to: ctx.accounts.user_wallet.to_account_info(), // User's wallet
+                    authority: ctx.accounts.locked_tokens.to_account_info(),
+                };
+    
+                // Transfer tokens using CPI
+                token::transfer(
+                    CpiContext::new(ctx.accounts.token_program.to_account_info(), transfer_accounts),
+                    unlock_amount,
+                )?;
+            }
+        }
+    
+        // Check for full unlock condition after market cap milestone reached
+        if current_market_cap >= 2500000 {
+            locked_tokens.has_full_unlocked = true; // Set flag if all tokens are unlocked
+        }
+    
+        Ok(())
+    }
+
+    pub fn check_full_unlock(ctx: Context<UnlockFull>, current_timestamp: i64) -> Result<()> {
+        let locked_tokens = &mut ctx.accounts.locked_tokens;
+    
+        // Check if 3 months have passed since distribution timestamp
+        if locked_tokens.total_locked > 0 && (current_timestamp - locked_tokens.distribution_timestamp) >= 60 * 60 * 24 * 90 {
+            // Iterate through user locks to unlock all remaining tokens
+            for user_lock in &mut locked_tokens.user_locks {
+                if user_lock.total_locked > 0 {
+                    // Transfer all remaining locked tokens
+                    let transfer_accounts = token::Transfer {
+                        from: ctx.accounts.locked_tokens.to_account_info(),
+                        to: ctx.accounts.user_wallet.to_account_info(), // User's wallet
+                        authority: ctx.accounts.locked_tokens.to_account_info(),
+                    };
+    
+                    token::transfer(
+                        CpiContext::new(ctx.accounts.token_program.to_account_info(), transfer_accounts),
+                        user_lock.total_locked,
+                    )?;
+    
+                    // Update the user's unlocked amount
+                    user_lock.unlocked_amount += user_lock.total_locked; 
+                    locked_tokens.total_locked -= user_lock.total_locked; // Clear locked amount
+                    user_lock.total_locked = 0; // Reset locked amount for this user
+                }
+            }
+            locked_tokens.has_full_unlocked = true; // Set flag to show full unlock has occurred
+        }
+    
+        Ok(())
+    }
+    
 }
 
 #[derive(Accounts)]
@@ -120,6 +231,58 @@ impl<'info> Transfer<'info> {
         };
         CpiContext::new(self.token_program.to_account_info(), cpi_accounts)
     }
+}
+
+#[account]
+pub struct UserTokenLock {
+    pub user: Pubkey,         // User's wallet address
+    pub total_locked: u64,    // Total amount of tokens locked for this user
+    pub unlocked_amount: u64,  // Amount of tokens that have been unlocked
+}
+
+#[account]
+pub struct LockedTokens {
+    pub total_locked: u64,                     // Total tokens locked in the contract
+    pub user_locks: Vec<UserTokenLock>,        // Store user locks
+    pub distribution_timestamp: i64,            // Timestamp of distribution 
+    pub has_full_unlocked: bool,                // Flag for if full unlock has occurred
+}
+
+pub const MARKET_CAP_MILESTONES: [(u64, u64); 8] = [
+    (45000, 10),
+    (105500, 20),
+    (225000, 30),
+    (395000, 40),
+    (650000, 50),
+    (997000, 60),
+    (1574000, 70),
+    (2500000, 100),
+];
+
+#[derive(Accounts)]
+pub struct PurchaseTokens<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>, // User purchasing tokens
+    #[account(mut)]
+    pub locked_tokens: Account<'info, LockedTokens>, // Account holding all user locks
+}
+
+#[derive(Accounts)]
+pub struct UnlockTokens<'info> {
+    #[account(mut)]
+    pub locked_tokens: Account<'info, LockedTokens>, // Account holding all user locks
+    pub token_program: Program<'info, Token>, // Token program for transfers
+    #[account(mut)]
+    pub user_wallet: AccountInfo<'info>, // Each user's wallet
+}
+
+#[derive(Accounts)]
+pub struct UnlockFull<'info> {
+    #[account(mut)]
+    pub locked_tokens: Account<'info, LockedTokens>, // Account holding all user locks
+    pub token_program: Program<'info, Token>, // Token program for transfers
+    #[account(mut)]
+    pub user_wallet: AccountInfo<'info>, // Each user's wallet, similar to previous transfers
 }
 
 #[error_code]
