@@ -27,29 +27,37 @@ pub mod hotwings {
         let sender = &ctx.accounts.sender;
         let receiver = &ctx.accounts.receiver;
     
-        let tax = (amount as f64 * 0.015).round() as u64; 
-        let to_burn = tax / 2; 
-        let to_marketing = tax / 2; 
+        // Check if the transaction involves the project or marketing wallet
+        let is_taxable = 
+            sender.key() == ctx.accounts.project_wallet.key() || 
+            receiver.key() == ctx.accounts.project_wallet.key() || 
+            sender.key() == ctx.accounts.marketing_wallet.key() || 
+            receiver.key() == ctx.accounts.marketing_wallet.key();
     
-        let amount_after_tax = amount.checked_sub(tax).ok_or(CustomError::InsufficientFunds)?;
-        
-        token::transfer(
-            ctx.accounts.transfer_context(amount_after_tax),
-            amount_after_tax,
-        )?;
+        if is_taxable {
+            // Apply tax logic only for these cases (e.g. buy or sell transactions).
+            let tax = (amount as f64 * 0.015).round() as u64;
+            let to_burn = tax / 2;
+            let to_marketing = tax / 2;
     
-        if to_burn > 0 {
-            token::transfer(
-                ctx.accounts.burn_context(to_burn),
-                to_burn,
-            )?;
-        }
+            // Calculate amount after tax
+            let amount_after_tax = amount.checked_sub(tax).ok_or(CustomError::InsufficientFunds)?;
     
-        if to_marketing > 0 {
-            token::transfer(
-                ctx.accounts.marketing_context(to_marketing),
-                to_marketing,
-            )?;
+            // Transfer the taxed amount
+            token::transfer(ctx.accounts.transfer_context(amount_after_tax), amount_after_tax)?;
+    
+            // Burn 0.75% (half of the tax)
+            if to_burn > 0 {
+                token::transfer(ctx.accounts.burn_context(to_burn), to_burn)?;
+            }
+    
+            // Send 0.75% (other half) to the marketing wallet
+            if to_marketing > 0 {
+                token::transfer(ctx.accounts.marketing_context(to_marketing), to_marketing)?;
+            }
+        } else {
+            // Standard user-to-user transfer with no tax
+            token::transfer(ctx.accounts.transfer_context(amount), amount)?;
         }
     
         Ok(())
@@ -207,15 +215,17 @@ pub struct Initialize<'info> {
 #[derive(Accounts)]
 pub struct Transfer<'info> {
     #[account(mut)]
-    pub sender: Account<'info, TokenAccount>,
+    pub sender: Account<'info, TokenAccount>, // Sender of the tokens
     #[account(mut)]
-    pub receiver: Account<'info, TokenAccount>,
-    pub token_program: Program<'info, Token>,
-    
+    pub receiver: Account<'info, TokenAccount>, // Receiver of the tokens
+    pub token_program: Program<'info, Token>, // Token program
+
     #[account(mut)] 
-    pub burn_wallet: Account<'info, TokenAccount>, 
+    pub burn_wallet: Account<'info, TokenAccount>, // To burn tax
     #[account(mut)] 
-    pub marketing_wallet: Account<'info, TokenAccount>, 
+    pub marketing_wallet: Account<'info, TokenAccount>, // To send marketing tax
+    #[account(mut)] 
+    pub project_wallet: Account<'info, TokenAccount>, // To check for taxable buy/sell interactions
 }
 
 impl<'info> Transfer<'info> {
