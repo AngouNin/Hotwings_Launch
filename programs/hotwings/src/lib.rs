@@ -3,64 +3,129 @@ use anchor_spl::token::{self, Mint, Token, TokenAccount};
 
 declare_id!("EBZJpxLE79aropXeAjtqbouWdF48iJGWFr89PoHSrXgs");
 
-// Declare the Solana program module
 #[program]
 pub mod hotwings {
     use super::*;
 
-    // Initialization function that mints the total supply of tokens to the specified project wallet.
     pub fn initialize(ctx: Context<Initialize>, total_supply: u64) -> Result<()> {
-        // Prepare arguments to call the token program's mint_to function.
         let cpi_accounts = token::MintTo {
-            // The Mint account where the tokens will be minted from.
             mint: ctx.accounts.mint.to_account_info(),
-            // The TokenAccount where the minted tokens will be sent.
             to: ctx.accounts.project_wallet.to_account_info(),
-            // The authority that is allowed to mint tokens.
             authority: ctx.accounts.authority.to_account_info(),
         };
 
-        // Get the token program's account information.
         let cpi_program = ctx.accounts.token_program.to_account_info();
 
-        // Perform the minting operation using a cross-program invocation (CPI).
         token::mint_to(CpiContext::new(cpi_program, cpi_accounts), total_supply)?;
-
-        // Return Ok if the operation was successful.
+        
         Ok(())
     }
 
-    // Function to transfer tokens from one account to another, with potential anti-whale protection and transaction tax 
     pub fn transfer(ctx: Context<Transfer>, amount: u64) -> Result<()> {
-        // Logic to enforce transfer rules (anti-whale protection, transaction tax, etc.) will be implemented here.
+        let sender = &ctx.accounts.sender;
+        let receiver = &ctx.accounts.receiver;
 
-        // Return Ok if the transfer rules are satisfied and the transfer operation is successful.
+        let total_supply = 1_000_000_000;
+        let max_hold = total_supply / 20;
+
+        let rpc_url = String::from("https://api.devnet.solana.com");
+        let connection = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+
+        let receiver_token_account = receiver.key(); 
+
+        let receiver_balance = connection
+            .get_token_account_balance(&receiver_token_account)
+            .unwrap(); 
+
+        require!(receiver_balance + amount <= max_hold, CustomError::MaxHoldExceeded);
+
+        let tax = (amount as f64 * 0.015).round() as u64; 
+        let to_burn = tax / 2; 
+        let to_marketing = tax / 2; 
+
+        let amount_after_tax = amount.checked_sub(tax).ok_or(CustomError::InsufficientFunds)?;
+        
+        token::transfer(
+            ctx.accounts.transfer_context(amount_after_tax),
+            amount_after_tax,
+        )?;
+
+        if to_burn > 0 {
+            token::transfer(
+                ctx.accounts.burn_context(to_burn),
+                to_burn,
+            )?;
+        }
+
+        if to_marketing > 0 {
+            token::transfer(
+                ctx.accounts.marketing_context(to_marketing),
+                to_marketing,
+            )?;
+        }
+
         Ok(())
     }
 }
 
-// Define the accounts context structure for the initialize function.
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = authority, space = 8 + 32)] // Initialize the mint account. `space` is used to allocate memory for the account.
-    pub mint: Account<'info, Mint>, // Account where tokens will be minted from.
-
-    #[account(mut)] // Mark the project wallet as mutable since it will receive minted tokens.
-    pub project_wallet: Account<'info, TokenAccount>, // Token account where the minted tokens will be sent.
-
-    pub authority: Signer<'info>, // The authority that initiates the minting process (must sign the transaction).
-
-    pub token_program: Program<'info, Token>, // The associated token program, typically the SPL token program.
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+    #[account(mut)]
+    pub project_wallet: Account<'info, TokenAccount>,
+    pub authority: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
-// Define the accounts context structure for the transfer function.
 #[derive(Accounts)]
 pub struct Transfer<'info> {
-    #[account(mut)] // Mark the sender's account as mutable since it will spend tokens.
-    pub sender: Account<'info, TokenAccount>, // Token account from which tokens will be sent.
+    #[account(mut)]
+    pub sender: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub receiver: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+    
+    #[account(mut)] 
+    pub burn_wallet: Account<'info, TokenAccount>, 
+    #[account(mut)] 
+    pub marketing_wallet: Account<'info, TokenAccount>, 
+}
 
-    #[account(mut)] // Mark the receiver's account as mutable since it will receive tokens.
-    pub receiver: Account<'info, TokenAccount>, // Token account where the tokens will be received.
+impl<'info> Transfer<'info> {
+    fn transfer_context(&self, amount: u64) -> CpiContext<'_, '_, '_, 'info, token::Transfer<'info>> {
+        let cpi_accounts = token::Transfer {
+            from: self.sender.to_account_info(),
+            to: self.receiver.to_account_info(),
+            authority: self.sender.to_account_info(),
+        };
+        CpiContext::new(self.token_program.to_account_info(), cpi_accounts)
+    }
 
-    pub token_program: Program<'info, Token>, // The associated token program, typically the SPL token program.
+    fn burn_context(&self, amount: u64) -> CpiContext<'_, '_, '_, 'info, token::Transfer<'info>> {
+        let cpi_accounts = token::Transfer {
+            from: self.sender.to_account_info(),
+            to: self.burn_wallet.to_account_info(),
+            authority: self.sender.to_account_info(),
+        };
+        CpiContext::new(self.token_program.to_account_info(), cpi_accounts)
+    }
+
+    fn marketing_context(&self, amount: u64) -> CpiContext<'_, '_, '_, 'info, token::Transfer<'info>> {
+        let cpi_accounts = token::Transfer {
+            from: self.sender.to_account_info(),
+            to: self.marketing_wallet.to_account_info(),
+            authority: self.sender.to_account_info(),
+        };
+        CpiContext::new(self.token_program.to_account_info(), cpi_accounts)
+    }
+}
+
+#[error_code]
+pub enum CustomError {
+    #[msg("Insufficient funds in the sender's account.")]
+    InsufficientFunds,
+    #[msg("Max hold amount exceeded for the receiver's account.")]
+    MaxHoldExceeded,
 }
