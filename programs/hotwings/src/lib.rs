@@ -3,6 +3,8 @@ use anchor_spl::token::{self, Mint, Token, TokenAccount};
 
 declare_id!("EBZJpxLE79aropXeAjtqbouWdF48iJGWFr89PoHSrXgs");
 
+const MAX_HOLD_AMOUNT: u64 = 50_000_000; // 50,000,000 tokens as the max holding cap (5% of total supply)
+
 #[program]
 pub mod hotwings {
     use super::*;
@@ -24,46 +26,32 @@ pub mod hotwings {
     pub fn transfer(ctx: Context<Transfer>, amount: u64) -> Result<()> {
         let sender = &ctx.accounts.sender;
         let receiver = &ctx.accounts.receiver;
-
-        let total_supply = 1_000_000_000;
-        let max_hold = total_supply / 20;
-
-        let rpc_url = String::from("https://api.devnet.solana.com");
-        let connection = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
-
-        let receiver_token_account = receiver.key(); 
-
-        let receiver_balance = connection
-            .get_token_account_balance(&receiver_token_account)
-            .unwrap(); 
-
-        require!(receiver_balance + amount <= max_hold, CustomError::MaxHoldExceeded);
-
+    
         let tax = (amount as f64 * 0.015).round() as u64; 
         let to_burn = tax / 2; 
         let to_marketing = tax / 2; 
-
+    
         let amount_after_tax = amount.checked_sub(tax).ok_or(CustomError::InsufficientFunds)?;
         
         token::transfer(
             ctx.accounts.transfer_context(amount_after_tax),
             amount_after_tax,
         )?;
-
+    
         if to_burn > 0 {
             token::transfer(
                 ctx.accounts.burn_context(to_burn),
                 to_burn,
             )?;
         }
-
+    
         if to_marketing > 0 {
             token::transfer(
                 ctx.accounts.marketing_context(to_marketing),
                 to_marketing,
             )?;
         }
-
+    
         Ok(())
     }
 
@@ -71,6 +59,27 @@ pub mod hotwings {
         let locked_tokens = &mut ctx.accounts.locked_tokens;
     
         let user = &ctx.accounts.user.key();
+
+        let mut total_balance = 0u64;
+
+        for user_lock in locked_tokens.user_locks.iter() {
+            if user_lock.user == *user {
+                total_balance += user_lock.total_locked; // Include locked tokens
+                break;
+            }
+        }
+
+        // Add unlocked tokens for this user
+        total_balance += amount; // User is trying to purchase `amount`
+
+        // Check holding cap, excluding special wallets
+        if !locked_tokens.has_full_unlocked {
+            if total_balance > MAX_HOLD_AMOUNT &&
+               ctx.accounts.user.key() != &ctx.accounts.project_wallet.key() &&
+               ctx.accounts.user.key() != &ctx.accounts.marketing_wallet.key() {
+                return Err(CustomError::MaxHoldExceeded);
+            }
+        }
         
         // Check if we already have this user in user_locks
         let mut user_found = false;
@@ -141,6 +150,7 @@ pub mod hotwings {
         if current_market_cap >= 2500000 {
             locked_tokens.has_full_unlocked = true; // Set flag if all tokens are unlocked
         }
+
     
         Ok(())
     }
@@ -172,6 +182,10 @@ pub mod hotwings {
                 }
             }
             locked_tokens.has_full_unlocked = true; // Set flag to show full unlock has occurred
+        }
+
+        if locked_tokens.total_locked == 0 {
+            locked_tokens.has_full_unlocked = true;
         }
     
         Ok(())
@@ -246,6 +260,7 @@ pub struct LockedTokens {
     pub user_locks: Vec<UserTokenLock>,        // Store user locks
     pub distribution_timestamp: i64,            // Timestamp of distribution 
     pub has_full_unlocked: bool,                // Flag for if full unlock has occurred
+    pub total_supply: u64, // Add to track total supply
 }
 
 pub const MARKET_CAP_MILESTONES: [(u64, u64); 8] = [
@@ -265,6 +280,10 @@ pub struct PurchaseTokens<'info> {
     pub user: Signer<'info>, // User purchasing tokens
     #[account(mut)]
     pub locked_tokens: Account<'info, LockedTokens>, // Account holding all user locks
+    #[account(mut)]
+    pub project_wallet: AccountInfo<'info>, // Project wallet for restriction
+    #[account(mut)]
+    pub marketing_wallet: AccountInfo<'info>, // Marketing wallet for restriction
 }
 
 #[derive(Accounts)]
