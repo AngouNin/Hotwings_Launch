@@ -70,42 +70,35 @@ pub mod hotwings {
 
         let mut total_balance = 0u64;
 
-        for user_lock in locked_tokens.user_locks.iter() {
-            if user_lock.user == *user {
-                total_balance += user_lock.total_locked; // Include locked tokens
-                break;
-            }
-        }
-
-        // Add unlocked tokens for this user
-        total_balance += amount; // User is trying to purchase `amount`
-
-        // Check holding cap, excluding special wallets
-        if !locked_tokens.has_full_unlocked {
-            if total_balance > MAX_HOLD_AMOUNT &&
-               ctx.accounts.user.key() != &ctx.accounts.project_wallet.key() &&
-               ctx.accounts.user.key() != &ctx.accounts.marketing_wallet.key() {
-                return Err(CustomError::MaxHoldExceeded);
-            }
-        }
-        
-        // Check if we already have this user in user_locks
         let mut user_found = false;
         for user_lock in locked_tokens.user_locks.iter_mut() {
             if user_lock.user == *user {
-                user_lock.total_locked += amount; // Update locked amount
-                user_found = true;
-                break;
+                total_balance = user_lock.total_locked + user_lock.unlocked_amount;
+                if !locked_tokens.has_full_unlocked {
+                    if (total_balance + amount) > MAX_HOLD_AMOUNT &&
+                       ctx.accounts.user.key() != &ctx.accounts.project_wallet.key() &&
+                       ctx.accounts.user.key() != &ctx.accounts.marketing_wallet.key() {
+                        return Err(CustomError::MaxHoldExceeded);
+                    }
+                    else {
+                        user_lock.total_locked += amount; // Update locked amount
+                        break;
+                    }
+                }
+                else {
+                    user_lock.total_locked += amount; // Update locked amount
+                        break;
+                }
+                
             }
-        }
-    
-        // If user is not found, create a new entry
-        if !user_found {
-            locked_tokens.user_locks.push(UserTokenLock {
-                user: *user,
-                total_locked: amount,
-                unlocked_amount: 0,
-            });
+            // If user is not found, create a new entry
+            else { 
+                locked_tokens.user_locks.push(UserTokenLock {
+                    user: *user,
+                    total_locked: amount,
+                    unlocked_amount: 0,
+                });
+            }
         }
     
         // Update the total locked tokens
