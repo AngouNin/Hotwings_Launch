@@ -23,6 +23,18 @@ pub mod hotwings {
         Ok(())
     }
 
+    pub fn initialize_locked_tokens(ctx: Context<InitializeLockedTokens>) -> Result<()> {
+        let locked_tokens = &mut ctx.accounts.locked_tokens;
+    
+        // Initialize the LockedTokens account with predefined values
+        locked_tokens.total_locked = 0;
+        locked_tokens.user_locks = vec![]; // Initialize the user locks
+        locked_tokens.distribution_timestamp = Clock::get()?.unix_timestamp; // Set current time
+        locked_tokens.has_full_unlocked = false; // Initially set to false
+    
+        Ok(())
+    }
+
     pub fn transfer(ctx: Context<Transfer>, amount: u64) -> Result<()> {
         let sender = &ctx.accounts.sender;
         let receiver = &ctx.accounts.receiver;
@@ -73,33 +85,46 @@ pub mod hotwings {
         let mut user_found = false;
         for user_lock in locked_tokens.user_locks.iter_mut() {
             if user_lock.user == *user {
-                total_balance = user_lock.total_locked + user_lock.unlocked_amount;
-                if !locked_tokens.has_full_unlocked {
-                    if (total_balance + amount) > MAX_HOLD_AMOUNT &&
-                       ctx.accounts.user.key() != &ctx.accounts.project_wallet.key() &&
-                       ctx.accounts.user.key() != &ctx.accounts.marketing_wallet.key() {
-                        return Err(CustomError::MaxHoldExceeded);
+                user_found = true;
+                break;
+            }
+        }
+    
+        // If user is not found, create a new entry
+        if user_found {
+            for user_lock in locked_tokens.user_locks.iter_mut() {
+                if user_lock.user == *user {
+                    total_balance = user_lock.total_locked + user_lock.unlocked_amount;
+                    if !locked_tokens.has_full_unlocked {
+                        if (total_balance + amount) > MAX_HOLD_AMOUNT &&
+                           ctx.accounts.user.key() != &ctx.accounts.project_wallet.key() &&
+                           ctx.accounts.user.key() != &ctx.accounts.marketing_wallet.key() {
+                            return Err(CustomError::MaxHoldExceeded);
+                        }
+                        else {
+                            user_lock.total_locked += amount; // Update locked amount
+                        }
                     }
                     else {
                         user_lock.total_locked += amount; // Update locked amount
-                        break;
                     }
-                }
-                else {
-                    user_lock.total_locked += amount; // Update locked amount
-                        break;
-                }
-                
-            }
-            // If user is not found, create a new entry
-            else { 
-                locked_tokens.user_locks.push(UserTokenLock {
-                    user: *user,
-                    total_locked: amount,
-                    unlocked_amount: 0,
-                });
+                    
+                    break;
+                };
             }
         }
+        else {
+            locked_tokens.user_locks.push(UserTokenLock {
+                user: *user,
+                total_locked: amount,
+                unlocked_amount: 0,
+            });
+        }
+
+        let mut user_found = false;
+        
+
+        
     
         // Update the total locked tokens
         locked_tokens.total_locked += amount;
@@ -206,6 +231,15 @@ pub struct Initialize<'info> {
 }
 
 #[derive(Accounts)]
+pub struct InitializeLockedTokens<'info> {
+    #[account(init, payer = authority, space = LockedTokens::LEN)]
+    pub locked_tokens: Account<'info, LockedTokens>,
+    pub authority: Signer<'info>, // Project wallet authority
+    pub token_program: Program<'info, Token>, // Token program
+    pub system_program: Program<'info, System>, // System program
+}
+
+#[derive(Accounts)]
 pub struct Transfer<'info> {
     #[account(mut)]
     pub sender: Account<'info, TokenAccount>, // Sender of the tokens
@@ -250,7 +284,7 @@ impl<'info> Transfer<'info> {
     }
 }
 
-#[account]
+#[derive(Clone, AnchorSerialize, AnchorDeserialize)]
 pub struct UserTokenLock {
     pub user: Pubkey,         // User's wallet address
     pub total_locked: u64,    // Total amount of tokens locked for this user
