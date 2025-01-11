@@ -1,9 +1,10 @@
 use anchor_lang::prelude::*;
+use crate::errors::CustomError;
+use crate::consts::{YOUR_PROJECT_WALLET, YOUR_MARKET_WALLET, YOUR_BURN_WALLET};
+use crate::consts::MAX_HOLD_AMOUNT;
 use anchor_spl::token::{self, Mint, Token, TokenAccount};
 
 declare_id!("EBZJpxLE79aropXeAjtqbouWdF48iJGWFr89PoHSrXgs");
-
-const MAX_HOLD_AMOUNT: u64 = 50_000_000; // 50,000,000 tokens as the max holding cap (5% of total supply)
 
 #[program]
 pub mod hotwings {
@@ -119,13 +120,8 @@ pub mod hotwings {
                 total_locked: amount,
                 unlocked_amount: 0,
             });
-        }
+        };
 
-        let mut user_found = false;
-        
-
-        
-    
         // Update the total locked tokens
         locked_tokens.total_locked += amount;
     
@@ -177,7 +173,6 @@ pub mod hotwings {
             locked_tokens.has_full_unlocked = true; // Set flag if all tokens are unlocked
         }
 
-    
         Ok(())
     }
 
@@ -223,8 +218,12 @@ pub mod hotwings {
 pub struct Initialize<'info> {
     #[account(mut)]
     pub mint: Account<'info, Mint>,
-    #[account(mut)]
+    #[account(address = Your_Project_Wallet)]
     pub project_wallet: Account<'info, TokenAccount>,
+    #[account(address = Your_Market_Wallet)]
+    pub marketing_wallet: Account<'info, TokenAccount>,
+    #[account(address = Your_Burn_Wallet)]
+    pub user_wallet: Account<'info, TokenAccount>,
     pub authority: Signer<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -300,6 +299,10 @@ pub struct LockedTokens {
     pub total_supply: u64, // Add to track total supply
 }
 
+impl LockedTokens {
+    pub const LEN: usize = 8 + 4800 + 8 + 1 + 8 + 32; // Total space estimate
+}
+
 pub const MARKET_CAP_MILESTONES: [(u64, u64); 8] = [
     (45000, 10),
     (105500, 20),
@@ -341,10 +344,3 @@ pub struct UnlockFull<'info> {
     pub user_wallet: AccountInfo<'info>, // Each user's wallet, similar to previous transfers
 }
 
-#[error_code]
-pub enum CustomError {
-    #[msg("Insufficient funds in the sender's account.")]
-    InsufficientFunds,
-    #[msg("Max hold amount exceeded for the receiver's account.")]
-    MaxHoldExceeded,
-}
